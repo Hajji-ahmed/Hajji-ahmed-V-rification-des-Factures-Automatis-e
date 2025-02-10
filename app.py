@@ -12,20 +12,20 @@ def extract_structured_data_from_pdf(pdf_file):
         text = ""
         for page in doc:
             text += page.get_text()
-        
+
         structured_data = {}
         for line in text.split("\n"):
-            if ":" in line:  # Supposons que les champs sont au format "Champ: Valeur"
+            if ":" in line:
                 key, value = line.split(":", 1)
                 structured_data[key.strip()] = value.strip()
-        
+
         return structured_data
     except Exception as e:
         st.error(f"Erreur lors de l'extraction du texte : {e}")
         return {}
 
 # 📌 Fonction pour comparer les données avec la base Excel
-def compare_with_reference(extracted_data, reference_file):
+def compare_with_reference(extracted_data, reference_file, selected_columns):
     try:
         reference_df = pd.read_excel(reference_file)
 
@@ -37,11 +37,11 @@ def compare_with_reference(extracted_data, reference_file):
         discrepancies = {}
 
         for index, row in reference_df.iterrows():
-            for col in reference_df.columns:
-                if col in extracted_df.columns:
+            for col in selected_columns:  # ✅ On ne compare que les colonnes sélectionnées
+                if col in extracted_df.columns and col in reference_df.columns:
                     if str(row[col]).strip() != str(extracted_df[col].values[0]).strip():
                         discrepancies[col] = extracted_df[col].values[0]
-        
+
         return discrepancies
     except Exception as e:
         st.error(f"Erreur lors de la comparaison : {e}")
@@ -67,6 +67,13 @@ st.sidebar.header("📥 Téléversement des fichiers")
 uploaded_pdf = st.sidebar.file_uploader("Téléverser une facture PDF", type=["pdf"])
 uploaded_excel = st.sidebar.file_uploader("Téléverser la base de référence Excel", type=["xlsx"])
 
+# 🔎 Sélection des colonnes à comparer
+selected_columns = []
+if uploaded_excel:
+    reference_df = pd.read_excel(uploaded_excel)
+    all_columns = reference_df.columns.tolist()
+    selected_columns = st.sidebar.multiselect("📌 Sélectionnez les champs à comparer :", all_columns, default=all_columns)
+
 # 🟢 Étape 1 : Extraction des données du PDF
 if uploaded_pdf:
     st.success("✅ Facture PDF téléversée avec succès !")
@@ -75,9 +82,9 @@ if uploaded_pdf:
         st.json(extracted_data)
 
 # 🟠 Étape 2 : Comparaison avec la base de référence
-if uploaded_pdf and uploaded_excel:
+if uploaded_pdf and uploaded_excel and selected_columns:
     st.success("✅ Base de référence Excel téléversée avec succès !")
-    discrepancies = compare_with_reference(extracted_data, uploaded_excel)
+    discrepancies = compare_with_reference(extracted_data, uploaded_excel, selected_columns)
 
     if discrepancies:
         st.markdown("### ⚠️ Écarts détectés")
@@ -91,7 +98,7 @@ if uploaded_pdf and uploaded_excel:
                            file_name="ecarts_detectes.xlsx",
                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
     else:
-        st.success("❌ Aucun écart détecté !")
+        st.success("✅ Aucun écart détecté !")
 
 # 🎛️ Sidebar : Options avancées
 st.sidebar.header("⚙️ Options avancées")
