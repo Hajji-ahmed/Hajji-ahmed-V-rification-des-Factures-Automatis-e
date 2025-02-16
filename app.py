@@ -1,111 +1,170 @@
+import requests
+import json
+import os
 import streamlit as st
-import fitz  # PyMuPDF
+import fitz  # PyMuPDF pour l'extraction du texte PDF
 import pandas as pd
-import openpyxl
-import io
-import re
+from openpyxl import load_workbook
+from io import BytesIO
+from dotenv import load_dotenv
 
-# 📌 Fonction pour nettoyer et extraire les données du PDF
-def extract_structured_data_from_pdf(pdf_file):
-    try:
-        doc = fitz.open(stream=pdf_file.read(), filetype="pdf")
-        text = ""
-        for page in doc:
-            text += page.get_text()
+# ✅ Chargement de la clé API depuis .env
+load_dotenv()
+api_key = os.getenv("API_KEY")
 
-        structured_data = {}
-        for line in text.split("\n"):
-            if ":" in line:
-                key, value = line.split(":", 1)
-                structured_data[key.strip()] = value.strip()
+if not api_key:
+    st.error("⚠️ Clé API introuvable ! Vérifiez le fichier .env et redémarrez l'application.")
+    st.stop()
 
-        return structured_data
-    except Exception as e:
-        st.error(f"Erreur lors de l'extraction du texte : {e}")
-        return {}
+# ✅ URL de l'API Gemini
+url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash-latest:generateContent?key={api_key}"
 
-# 📌 Fonction pour comparer les données avec la base Excel
-def compare_with_reference(extracted_data, reference_file, selected_columns):
-    try:
-        reference_df = pd.read_excel(reference_file)
+# ✅ Configuration de Streamlit
+st.set_page_config(page_title="Validation des Factures", page_icon="📄", layout="wide")
+st.title("📄 Validation Automatisée des Factures avec Gemini")
 
-        if reference_df.empty:
-            st.warning("⚠️ La base de référence est vide.")
-            return {}
+# 📌 Fonction pour extraire le texte d'un PDF
+def extract_text_from_pdf(uploaded_file):
+    """Extrait le texte brut d'un fichier PDF."""
+    pdf_data = ""
+    with fitz.open(stream=uploaded_file.read(), filetype="pdf") as pdf:
+        for page in pdf:
+            pdf_data += page.get_text("text") + "\n"
+    return pdf_data.strip()
 
-        extracted_df = pd.DataFrame([extracted_data])
-        discrepancies = {}
+# 📌 Fonction pour structurer les données avec Gemini
+def get_structured_data_from_gemini(extracted_text):
+    """Envoie le texte brut à l'API Gemini et récupère une réponse JSON correcte."""
+    headers = {"Content-Type": "application/json"}
 
-        for index, row in reference_df.iterrows():
-            for col in selected_columns:  # ✅ On ne compare que les colonnes sélectionnées
-                if col in extracted_df.columns and col in reference_df.columns:
-                    if str(row[col]).strip() != str(extracted_df[col].values[0]).strip():
-                        discrepancies[col] = extracted_df[col].values[0]
+    payload = {
+        "contents": [
+            {
+                "parts": [
+                    {
+                        "text": """Tu es un assistant d'extraction de factures.
+                        Récupère uniquement les données sous ce format JSON strict :
+                        {
+                            "numéro_facture": "12345",
+                            "date_facture": "2024-02-15",
+                            "montant_total": "500",
+                            "nom_client": "Entreprise XYZ"
+                        }
+                        ❌ Ne renvoie **aucun texte supplémentaire** en dehors du JSON.
+                        ✅ Réponds uniquement avec un JSON valide."""
+                    },
+                    {"text": f"Facture brute : {extracted_text}"}
+                ]
+            }
+        ],
+        "generation_config": {"temperature": 0.2},  # Diminue la créativité pour stabiliser la réponse
+    }
 
-        return discrepancies
-    except Exception as e:
-        st.error(f"Erreur lors de la comparaison : {e}")
-        return {}
+    response = requests.post(url, headers=headers, json=payload)
 
-# 📌 Fonction pour générer un fichier Excel des écarts détectés
-def generate_discrepancy_excel(discrepancies):
-    output = io.BytesIO()
-    df = pd.DataFrame([discrepancies])
-    with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
-        df.to_excel(writer, index=False, sheet_name="Écarts détectés")
-    return output.getvalue()
+    if response.status_code == 200:
+        result = response.json()
+        st.write("🔍 Réponse brute de l'API :", result)  # Debugging
 
-# 🎨 Interface modernisée avec Streamlit
-st.set_page_config(page_title="Vérification des Factures", page_icon="🧾", layout="wide")
+        if "candidates" not in result or not result["candidates"]:
+            st.error("❌ Réponse vide de l'API Gemini. Vérifiez votre prompt ou les crédits API.")
+            return None
 
-# 🔵 En-tête stylisé
-st.markdown("<h1 style='text-align: center; color: #4CAF50;'>🔍 Vérification des Factures Automatisée</h1>", unsafe_allow_html=True)
-st.write("📂 **Téléversez une facture PDF et une base de référence Excel pour détecter les écarts.**")
+        response_text = result["candidates"][0]["content"]["parts"][0]["text"]
 
-# 📂 Sidebar : Importation des fichiers
-st.sidebar.header("📥 Téléversement des fichiers")
-uploaded_pdf = st.sidebar.file_uploader("Téléverser une facture PDF", type=["pdf"])
-uploaded_excel = st.sidebar.file_uploader("Téléverser la base de référence Excel", type=["xlsx"])
+        if not response_text.strip():  # Vérifie si la réponse est vide
+            st.error("❌ L'API a renvoyé une réponse vide.")
+            return None
 
-# 🔎 Sélection des colonnes à comparer
-selected_columns = []
-if uploaded_excel:
-    reference_df = pd.read_excel(uploaded_excel)
-    all_columns = reference_df.columns.tolist()
-    selected_columns = st.sidebar.multiselect("📌 Sélectionnez les champs à comparer :", all_columns, default=all_columns)
+        try:
+            # ✅ Nettoyer la réponse brute pour éviter l'erreur de parsing
+            response_text = response_text.strip("`json").strip("```").strip()
 
-# 🟢 Étape 1 : Extraction des données du PDF
-if uploaded_pdf:
-    st.success("✅ Facture PDF téléversée avec succès !")
-    with st.expander("📜 Voir le texte extrait", expanded=False):
-        extracted_data = extract_structured_data_from_pdf(uploaded_pdf)
-        st.json(extracted_data)
+            # ✅ Trouver la position du premier `{` et du dernier `}`
+            start = response_text.find("{")
+            end = response_text.rfind("}")
 
-# 🟠 Étape 2 : Comparaison avec la base de référence
-if uploaded_pdf and uploaded_excel and selected_columns:
-    st.success("✅ Base de référence Excel téléversée avec succès !")
-    discrepancies = compare_with_reference(extracted_data, uploaded_excel, selected_columns)
+            if start == -1 or end == -1:
+                st.error("❌ Erreur : Aucun JSON valide trouvé dans la réponse de l'API.")
+                return None
 
-    if discrepancies:
-        st.markdown("### ⚠️ Écarts détectés")
-        st.write("Les différences suivantes ont été trouvées entre la facture et la base de référence :")
-        st.table(pd.DataFrame([discrepancies]))
+            json_cleaned = response_text[start:end+1]  # Extraire uniquement le JSON
 
-        # 📥 Bouton d'exportation en Excel
-        excel_data = generate_discrepancy_excel(discrepancies)
-        st.download_button(label="📥 Télécharger le rapport en Excel",
-                           data=excel_data,
-                           file_name="ecarts_detectes.xlsx",
-                           mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+            # ✅ Convertir en dictionnaire Python
+            structured_data = json.loads(json_cleaned)
+            return structured_data
+        except json.JSONDecodeError as e:
+            st.error(f"❌ Erreur de conversion JSON : {e}")
+            st.write("🔍 Réponse brute après nettoyage :", response_text)  # Debugging
+            return None
     else:
-        st.success("✅ Aucun écart détecté !")
+        st.error(f"❌ Erreur API Gemini : {response.status_code}")
+        st.write("🔍 Contenu de la réponse :", response.text)  # Debugging
+        return None
 
-# 🎛️ Sidebar : Options avancées
-st.sidebar.header("⚙️ Options avancées")
-scroll_position = st.sidebar.slider("📜 Ajuster le défilement", 0, 100, 50)
-brightness = st.sidebar.slider("💡 Luminosité de l'affichage", 0.5, 1.5, 1.0)
-st.sidebar.image("https://via.placeholder.com/300", caption="Aperçu de la facture", use_container_width=True)
+# 📌 Fonction pour charger la base de référence Excel
+def load_reference_data(uploaded_excel):
+    """Charge un fichier Excel et retourne la liste des feuilles."""
+    xls = pd.ExcelFile(uploaded_excel)
+    return xls
 
-# 📌 Ajout d'une barre de séparation pour la fin de l'application
-st.markdown("---")
-st.write("✨ Merci d'utiliser notre application de contrôle des factures !")
+# 📌 Fonction pour comparer les données extraites avec la base de référence
+def compare_data(extracted_data, reference_data):
+    """Compare les données extraites avec la base de référence Excel."""
+    extracted_df = pd.DataFrame([extracted_data])
+    discrepancies = pd.concat([extracted_df, reference_data]).drop_duplicates(keep=False)
+    return discrepancies
+
+# 📌 Interface utilisateur pour télécharger les fichiers
+st.sidebar.header("📂 Téléverser les fichiers")
+uploaded_pdf = st.sidebar.file_uploader("📄 Téléverser une facture (PDF)", type="pdf")
+uploaded_excel = st.sidebar.file_uploader("📊 Téléverser la base de référence (Excel)", type="xlsx")
+
+# 📌 Extraction et affichage des données du PDF
+if uploaded_pdf:
+    st.subheader("📜 Données extraites du PDF")
+    extracted_text = extract_text_from_pdf(uploaded_pdf)
+    st.text_area("🔍 Texte extrait", extracted_text, height=200)
+
+    # Structuration des données via Gemini
+    structured_data = get_structured_data_from_gemini(extracted_text)
+    
+    if structured_data:
+        st.subheader("📑 Données structurées par Gemini")
+        structured_df = pd.DataFrame([structured_data])
+        st.dataframe(structured_df)
+
+# 📌 Chargement et affichage de la base Excel
+if uploaded_excel:
+    xls = load_reference_data(uploaded_excel)
+    sheet_names = xls.sheet_names
+    selected_sheet = st.selectbox("📜 Sélectionner une feuille", sheet_names)
+    reference_data = pd.read_excel(xls, sheet_name=selected_sheet)
+
+    st.subheader(f"📊 Base de référence : {selected_sheet}")
+    st.dataframe(reference_data)
+
+# 📌 Comparaison des données et affichage des écarts
+if uploaded_pdf and uploaded_excel and structured_data:
+    st.subheader("⚖️ Comparaison des données")
+    discrepancies = compare_data(structured_data, reference_data)
+
+    if not discrepancies.empty:
+        st.error("⚠️ Des écarts ont été détectés !")
+        st.dataframe(discrepancies)
+    else:
+        st.success("✅ Aucun écart détecté, la facture est conforme.")
+
+# 📌 Téléchargement des résultats
+if uploaded_pdf and uploaded_excel and structured_data:
+    output = BytesIO()
+    with pd.ExcelWriter(output, engine="openpyxl") as writer:
+        discrepancies.to_excel(writer, index=False, sheet_name="Écarts")
+    output.seek(0)
+
+    st.download_button(
+        label="⬇️ Télécharger les écarts en Excel",
+        data=output,
+        file_name="ecarts_detectes.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    )
