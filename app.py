@@ -2,8 +2,9 @@ import requests
 import json
 import os
 import streamlit as st
-import fitz  # PyMuPDF pour l'extraction du texte PDF
+import fitz  # PyMuPDF pour extraire le texte des factures
 import pandas as pd
+from fuzzywuzzy import fuzz
 from openpyxl import load_workbook
 from io import BytesIO
 from dotenv import load_dotenv
@@ -21,7 +22,7 @@ url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash
 
 # ✅ Configuration de Streamlit
 st.set_page_config(page_title="Validation des Factures", page_icon="📄", layout="wide")
-st.title("📄 Validation Automatisée des Factures avec Gemini")
+st.title("📄 Validation Automatisée des Factures ")
 
 # 📌 Fonction pour extraire le texte d'un PDF
 def extract_text_from_pdf(uploaded_file):
@@ -37,134 +38,131 @@ def get_structured_data_from_gemini(extracted_text):
     """Envoie le texte brut à l'API Gemini et récupère une réponse JSON correcte."""
     headers = {"Content-Type": "application/json"}
 
+    prompt = """Tu es un assistant spécialisé dans l'extraction de factures.
+    Récupère uniquement les données sous ce format JSON strict :
+    {
+        "numéro_facture": "12345",
+        "date_facture": "2024-02-15",
+        "date_echeance": "2024-03-15",
+        "mode_reglement": "Virement",
+        "client": {
+            "nom": "Entreprise XYZ",
+            "adresse": "123 Rue de Paris, 75001 Paris",
+            "TVA_intracommunautaire": "FR123456789"
+        },
+        "banque": {
+            "IBAN": "FR7612345678901234567890123",
+            "BIC": "BNPAFRPP"
+        },
+        "montants": {
+            "total_HT": "500",
+            "TVA": "20%",
+            "total_TVA": "100",
+            "total_TTC": "600"
+        },
+        "produits": [
+            {"nom": "Produit A", "quantité": 2, "prix_unitaire": 100},
+            {"nom": "Produit B", "quantité": 3, "prix_unitaire": 50}
+        ]
+    }
+    ❌ Ne renvoie **aucun texte supplémentaire** en dehors du JSON.
+    ✅ Réponds uniquement avec un JSON valide."""
+
     payload = {
         "contents": [
             {
                 "parts": [
-                    {
-                        "text": """Tu es un assistant d'extraction de factures.
-                        Récupère uniquement les données sous ce format JSON strict :
-                        {
-                            "numéro_facture": "12345",
-                            "date_facture": "2024-02-15",
-                            "montant_total": "500",
-                            "nom_client": "Entreprise XYZ"
-                        }
-                        ❌ Ne renvoie **aucun texte supplémentaire** en dehors du JSON.
-                        ✅ Réponds uniquement avec un JSON valide."""
-                    },
+                    {"text": prompt},
                     {"text": f"Facture brute : {extracted_text}"}
                 ]
             }
         ],
-        "generation_config": {"temperature": 0.2},  # Diminue la créativité pour stabiliser la réponse
+        "generation_config": {"temperature": 0.1},  
     }
 
     response = requests.post(url, headers=headers, json=payload)
 
     if response.status_code == 200:
         result = response.json()
-        st.write("🔍 Réponse brute de l'API :", result)  # Debugging
-
-        if "candidates" not in result or not result["candidates"]:
-            st.error("❌ Réponse vide de l'API Gemini. Vérifiez votre prompt ou les crédits API.")
-            return None
-
         response_text = result["candidates"][0]["content"]["parts"][0]["text"]
-
-        if not response_text.strip():  # Vérifie si la réponse est vide
-            st.error("❌ L'API a renvoyé une réponse vide.")
-            return None
-
+        
         try:
-            # ✅ Nettoyer la réponse brute pour éviter l'erreur de parsing
             response_text = response_text.strip("`json").strip("```").strip()
-
-            # ✅ Trouver la position du premier `{` et du dernier `}`
             start = response_text.find("{")
             end = response_text.rfind("}")
-
-            if start == -1 or end == -1:
-                st.error("❌ Erreur : Aucun JSON valide trouvé dans la réponse de l'API.")
-                return None
-
-            json_cleaned = response_text[start:end+1]  # Extraire uniquement le JSON
-
-            # ✅ Convertir en dictionnaire Python
+            json_cleaned = response_text[start:end+1]
             structured_data = json.loads(json_cleaned)
             return structured_data
         except json.JSONDecodeError as e:
             st.error(f"❌ Erreur de conversion JSON : {e}")
-            st.write("🔍 Réponse brute après nettoyage :", response_text)  # Debugging
             return None
     else:
         st.error(f"❌ Erreur API Gemini : {response.status_code}")
-        st.write("🔍 Contenu de la réponse :", response.text)  # Debugging
         return None
 
-# 📌 Fonction pour charger la base de référence Excel
-def load_reference_data(uploaded_excel):
-    """Charge un fichier Excel et retourne la liste des feuilles."""
-    xls = pd.ExcelFile(uploaded_excel)
-    return xls
+# 📌 Chatbot utilisant l'API Gemini
+def chatbot_gemini(user_question, extracted_data, reference_data):
+    """Envoie la question de l'utilisateur à l'API Gemini en lui donnant le contexte des données."""
+    headers = {"Content-Type": "application/json"}
 
-# 📌 Fonction pour comparer les données extraites avec la base de référence
-def compare_data(extracted_data, reference_data):
-    """Compare les données extraites avec la base de référence Excel."""
-    extracted_df = pd.DataFrame([extracted_data])
-    discrepancies = pd.concat([extracted_df, reference_data]).drop_duplicates(keep=False)
-    return discrepancies
+    prompt = f"""Tu es un assistant expert en facturation.
+    L'utilisateur a une question concernant la facture et la base de données.
+    Voici les informations de la facture :
+    {json.dumps(extracted_data, indent=2)}
+    Voici les données de référence :
+    {reference_data.to_json(orient="records")}
+    Réponds de manière claire et détaillée."""
 
-# 📌 Interface utilisateur pour télécharger les fichiers
+    payload = {
+        "contents": [
+            {
+                "parts": [
+                    {"text": prompt},
+                    {"text": f"Question : {user_question}"}
+                ]
+            }
+        ],
+        "generation_config": {"temperature": 0.3},  
+    }
+
+    response = requests.post(url, headers=headers, json=payload)
+
+    if response.status_code == 200:
+        result = response.json()
+        return result["candidates"][0]["content"]["parts"][0]["text"]
+    else:
+        return f"Erreur API Gemini : {response.status_code}"
+
+# 📌 Interface utilisateur
 st.sidebar.header("📂 Téléverser les fichiers")
 uploaded_pdf = st.sidebar.file_uploader("📄 Téléverser une facture (PDF)", type="pdf")
 uploaded_excel = st.sidebar.file_uploader("📊 Téléverser la base de référence (Excel)", type="xlsx")
 
-# 📌 Extraction et affichage des données du PDF
 if uploaded_pdf:
     st.subheader("📜 Données extraites du PDF")
     extracted_text = extract_text_from_pdf(uploaded_pdf)
     st.text_area("🔍 Texte extrait", extracted_text, height=200)
 
-    # Structuration des données via Gemini
     structured_data = get_structured_data_from_gemini(extracted_text)
-    
+
     if structured_data:
         st.subheader("📑 Données structurées par Gemini")
         structured_df = pd.DataFrame([structured_data])
         st.dataframe(structured_df)
 
-# 📌 Chargement et affichage de la base Excel
 if uploaded_excel:
-    xls = load_reference_data(uploaded_excel)
-    sheet_names = xls.sheet_names
-    selected_sheet = st.selectbox("📜 Sélectionner une feuille", sheet_names)
+    xls = pd.ExcelFile(uploaded_excel)
+    selected_sheet = st.selectbox("📜 Sélectionner une feuille", xls.sheet_names)
     reference_data = pd.read_excel(xls, sheet_name=selected_sheet)
 
     st.subheader(f"📊 Base de référence : {selected_sheet}")
     st.dataframe(reference_data)
 
-# 📌 Comparaison des données et affichage des écarts
-if uploaded_pdf and uploaded_excel and structured_data:
-    st.subheader("⚖️ Comparaison des données")
-    discrepancies = compare_data(structured_data, reference_data)
+# 📌 Chatbot interactif
+if uploaded_pdf and uploaded_excel and structured_data is not None:
+    st.subheader("💬 Chatbot : Posez vos questions sur la facture")
+    user_question = st.text_input("❓ Posez une question sur la facture ou la base de données")
 
-    if not discrepancies.empty:
-        st.error("⚠️ Des écarts ont été détectés !")
-        st.dataframe(discrepancies)
-    else:
-        st.success("✅ Aucun écart détecté, la facture est conforme.")
-
-# 📌 Téléchargement des résultats
-if uploaded_pdf and uploaded_excel and structured_data:
-    output = BytesIO()
-    with pd.ExcelWriter(output, engine="openpyxl") as writer:
-        discrepancies.to_excel(writer, index=False, sheet_name="Écarts")
-    output.seek(0)
-
-    st.download_button(
-        label="⬇️ Télécharger les écarts en Excel",
-        data=output,
-        file_name="ecarts_detectes.xlsx",
-        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-    )
+    if user_question:
+        chatbot_response = chatbot_gemini(user_question, structured_data, reference_data)
+        st.write("🧠 Réponse du chatbot :", chatbot_response)
