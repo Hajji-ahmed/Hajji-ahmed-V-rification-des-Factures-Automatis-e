@@ -4,7 +4,6 @@ import os
 import streamlit as st
 import fitz  # PyMuPDF pour extraire le texte des factures
 import pandas as pd
-from fuzzywuzzy import fuzz
 from openpyxl import load_workbook
 from io import BytesIO
 from dotenv import load_dotenv
@@ -14,7 +13,7 @@ load_dotenv()
 api_key = os.getenv("API_KEY")
 
 if not api_key:
-    st.error("⚠️ Clé API introuvable ! Vérifiez le fichier .env et redémarrez l'application.")
+    st.error("⚠️ Clé API introuvable ! Vérifiez le fichier .env et redémarrez l'application.", icon="🚨")
     st.stop()
 
 # ✅ URL de l'API Gemini
@@ -22,7 +21,57 @@ url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash
 
 # ✅ Configuration de Streamlit
 st.set_page_config(page_title="Validation des Factures", page_icon="📄", layout="wide")
+st.image("img.png", width=500)
 st.title("📄 Validation Automatisée des Factures ")
+
+# Ajouter des styles CSS personnalisés
+st.markdown("""
+    <style>
+        /* Style général */
+        body {
+            font-family: 'Arial', sans-serif;
+        }
+        
+        /* Style des titres */
+        h1, h2, h3 {
+            color:rgb(5, 107, 20);
+        }
+        
+        /* Style des boutons */
+        .stButton>button {
+            background-color: #FF4B4B;
+            color: white;
+            border-radius: 5px;
+            padding: 10px 20px;
+            border: none;
+        }
+        
+        /* Style des zones de texte */
+        .stTextArea>textarea {
+            border-radius: 5px;
+            border: 1px solid #FF4B4B;
+        }
+        
+        /* Style des dataframes */
+        .stDataFrame {
+            border-radius: 5px;
+            border: 1px solid #FF4B4B;
+        }
+        
+        /* Style des onglets */
+        .stTabs [role="tab"] {
+            background-color: #F0F2F6;
+            color: #262730;
+            border-radius: 5px;
+            padding: 10px;
+        }
+        
+        .stTabs [role="tab"][aria-selected="true"] {
+            background-color: #FF4B4B;
+            color: white;
+        }
+    </style>
+""", unsafe_allow_html=True)
 
 # 📌 Fonction pour extraire le texte d'un PDF
 def extract_text_from_pdf(uploaded_file):
@@ -38,8 +87,8 @@ def get_structured_data_from_gemini(extracted_text):
     """Envoie le texte brut à l'API Gemini et récupère une réponse JSON correcte."""
     headers = {"Content-Type": "application/json"}
 
-    prompt = """Tu es un assistant spécialisé dans l'extraction de factures.
-    Récupère uniquement les données sous ce format JSON strict :
+    prompt = """Tu es un assistant expert en facturation. 
+    Récupère uniquement les informations sous ce format JSON strict :
     {
         "numéro_facture": "12345",
         "date_facture": "2024-02-15",
@@ -100,17 +149,19 @@ def get_structured_data_from_gemini(extracted_text):
         st.error(f"❌ Erreur API Gemini : {response.status_code}")
         return None
 
-# 📌 Chatbot utilisant l'API Gemini
-def chatbot_gemini(user_question, extracted_data, reference_data):
-    """Envoie la question de l'utilisateur à l'API Gemini en lui donnant le contexte des données."""
+# 📌 Chatbot avec Historique de Conversation
+def chatbot_gemini(user_question, extracted_data, reference_data, chat_history):
+    """Envoie la question de l'utilisateur à l'API Gemini avec l'historique des messages."""
     headers = {"Content-Type": "application/json"}
 
-    prompt = f"""Tu es un assistant expert en facturation.
-    L'utilisateur a une question concernant la facture et la base de données.
+    prompt = f"""Tu es un assistant spécialisé dans les factures.
+    L'utilisateur pose des questions sur une facture et sa base de référence.
     Voici les informations de la facture :
     {json.dumps(extracted_data, indent=2)}
     Voici les données de référence :
     {reference_data.to_json(orient="records")}
+    Voici l'historique de la conversation :
+    {json.dumps(chat_history, indent=2)}
     Réponds de manière claire et détaillée."""
 
     payload = {
@@ -133,7 +184,12 @@ def chatbot_gemini(user_question, extracted_data, reference_data):
     else:
         return f"Erreur API Gemini : {response.status_code}"
 
+# 📌 Initialisation de l'historique de conversation
+if "chat_history" not in st.session_state:
+    st.session_state.chat_history = []
+
 # 📌 Interface utilisateur
+
 st.sidebar.header("📂 Téléverser les fichiers")
 uploaded_pdf = st.sidebar.file_uploader("📄 Téléverser une facture (PDF)", type="pdf")
 uploaded_excel = st.sidebar.file_uploader("📊 Téléverser la base de référence (Excel)", type="xlsx")
@@ -158,11 +214,33 @@ if uploaded_excel:
     st.subheader(f"📊 Base de référence : {selected_sheet}")
     st.dataframe(reference_data)
 
-# 📌 Chatbot interactif
+# 📌 Chatbot interactif avec historique
 if uploaded_pdf and uploaded_excel and structured_data is not None:
     st.subheader("💬 Chatbot : Posez vos questions sur la facture")
-    user_question = st.text_input("❓ Posez une question sur la facture ou la base de données")
+    
+    # Initialiser la variable de session pour stocker la question
+    if "user_question" not in st.session_state:
+        st.session_state.user_question = ""
 
-    if user_question:
-        chatbot_response = chatbot_gemini(user_question, structured_data, reference_data)
-        st.write("🧠 Réponse du chatbot :", chatbot_response)
+    # Champ de saisie pour la question avec une clé unique
+    user_question = st.text_input(
+        "❓ Posez une question sur la facture ou la base de données",
+        value=st.session_state.user_question,
+        key="question_input"  # Clé unique pour le champ de saisie
+    )
+
+    # Bouton pour envoyer la question
+    if st.button("Envoyer"):
+        if user_question:
+            chatbot_response = chatbot_gemini(user_question, structured_data, reference_data, st.session_state.chat_history)
+            
+            # Stocker la question et la réponse dans l'historique
+            st.session_state.chat_history.append({"question": user_question, "réponse": chatbot_response})
+            
+            # Vider le champ de saisie après l'envoi de la question
+            st.session_state.user_question = ""  # Vider la variable de session
+
+    # Afficher l'historique sous forme de conversation
+    for chat in st.session_state.chat_history:
+        st.markdown(f"**🗣️ Vous :** {chat['question']}")
+        st.markdown(f"**🤖 Chatbot :** {chat['réponse']}")
