@@ -202,7 +202,7 @@ if uploaded_pdf:
     structured_data = get_structured_data_from_gemini(extracted_text)
 
     if structured_data:
-        st.subheader("📑 Données structurées par Gemini")
+        st.subheader("📑 Données structurées")
         structured_df = pd.DataFrame([structured_data])
         st.dataframe(structured_df)
 
